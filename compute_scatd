@@ -1,0 +1,110 @@
+function S = compute_scatd(p, L, R, st, opt)
+%COMPUTE_SCATD  Safety-critical allowable time delay from the finite-time quadratic envelope.
+
+if nargin < 5, opt = struct(); end
+opt = setdef(opt,'a_f',[8 8]);
+opt = setdef(opt,'use_bound',true);
+opt = setdef(opt,'aiac_share',0.0);
+
+spec = p.spec;  ix = spec.ix;
+a1 = opt.a_f(1);  a2 = opt.a_f(2);
+opt = setdef(opt,'tau_local', spec.num.Ts_ctrl);
+
+st = setdef(st,'dP_imb', p.beta*abs(spec.safety.df_min_pu));
+
+if isfield(st,'x0') && ~isempty(st.x0)
+    cfgb = struct('a_f',opt.a_f,'Delta_cbf',0);
+    Bx   = barrier_functions(st.x0, 0, [0; st.dP_imb; 0], p, 0, cfgb);
+    st.h0     = Bx.f.h;
+    st.hdot0  = Bx.f.Lfh;
+    st.Lf2h0  = Bx.f.Lf2h;
+    st.SoC0   = st.x0(ix.dSB);
+else
+    st = setdef(st,'SoC0', p.SoC_nom);
+    st = setdef(st,'h0',  -spec.safety.df_min_pu);
+    if ~isfield(st,'hdot0') || isempty(st.hdot0)
+        st.hdot0 = R.hdot0(st.dP_imb);
+    end
+    st = setdef(st,'Lf2h0', 0);
+end
+
+a_d_bound = R.a_d_bound;
+a_d_fit   = R.a_d_fit;
+a_d = a_d_bound;
+if ~opt.use_bound, a_d = a_d_fit; end
+
+Phi0 = phiOf(st.SoC0, p);
+LgLf = [ Phi0/(p.M*p.TB) , -1/(p.M*p.Tac) ];
+A_auth = abs(LgLf(1))*max(abs([p.uB_min p.uB_max])) ...
+       + abs(LgLf(2))*max(abs([p.uA_min p.uA_max]));
+
+Delta = L.Delta_cbf_direct(opt.tau_local, a1, a2);
+
+S.h_min = max( ( Delta - A_auth - st.Lf2h0 - (a1+a2)*st.hdot0 ) / (a1*a2), 0 );
+
+S.h_min_of_SoC = @(Sx) max( ( Delta ...
+    - ( abs(phiOf(Sx,p)/(p.M*p.TB))*max(abs([p.uB_min p.uB_max])) ...
+      + abs(1/(p.M*p.Tac))*max(abs([p.uA_min p.uA_max])) ) ...
+    - st.Lf2h0 - (a1+a2)*st.hdot0 ) / (a1*a2), 0 );
+
+S.T_detect = L.tau_max_feasible;
+
+if isfinite(R.lambda_d) && R.lambda_d > 0 && st.h0 > S.h_min && S.h_min > 0
+    S.T_exp = (1/R.lambda_d)*log(st.h0/S.h_min);
+else
+    S.T_exp = Inf;
+end
+S.T_exp_reaches_zero = false;
+
+S.T_quad       = time_to_floor(st.h0, st.hdot0, a_d,       S.h_min);
+S.T_quad_bound = time_to_floor(st.h0, st.hdot0, a_d_bound, S.h_min);
+S.T_quad_fit   = time_to_floor(st.h0, st.hdot0, a_d_fit,   S.h_min);
+S.a_d_used     = a_d;
+
+P_aiac = min(opt.aiac_share*st.dP_imb, max(abs([p.uA_min p.uA_max])));
+P_bess = max(st.dP_imb - P_aiac, 0);
+P_bess = min(P_bess, p.uB_max);
+S.P_bess = P_bess;
+S.P_aiac = P_aiac;
+
+if P_bess <= 0
+    S.T_sustain  = Inf;
+    S.binding    = 'authority';
+elseif P_bess >= p.uB_max*(1 - 1e-9) && st.dP_imb > p.uB_max + P_aiac
+    S.T_sustain  = 0;
+    S.binding    = 'authority';
+else
+    dSoC        = max(st.SoC0 - p.SoC_enf_lo, 0);
+    S.T_sustain = dSoC*p.E_B_s/(p.eta_B*P_bess);
+    S.binding   = 'energy';
+end
+
+S.T_prop = S.T_detect + S.T_sustain;
+
+T_margin_only = S.T_quad;
+if T_margin_only < S.T_detect
+    S.T_prop  = T_margin_only;
+    S.binding = 'margin';
+end
+
+S.detail = struct('Phi0',Phi0,'LgLf',LgLf,'A_auth',A_auth,'Delta_cbf',Delta, ...
+                  'a_d',a_d,'a_d_source',ternary(opt.use_bound,'analytic bound','fitted'), ...
+                  'h0',st.h0,'hdot0',st.hdot0,'SoC0',st.SoC0,'dP_imb',st.dP_imb, ...
+                  'a_f',opt.a_f,'SoC_enf_lo',p.SoC_enf_lo, ...
+                  'Lf2h0',st.Lf2h0,'tau_local',opt.tau_local, ...
+                  'dP_crit',p.beta*abs(spec.safety.df_min_pu));
+S.state = st;
+end   % compute_scatd
+
+function Phi = phiOf(S, p)
+Phi = 0.25*(1 + tanh(p.ks*(S - p.SoC_lo)))*(1 - tanh(p.ks*(S - p.SoC_hi)));
+Phi = min(max(Phi,0),1);
+end
+
+function s = setdef(s,f,v)
+if ~isfield(s,f) || isempty(s.(f)), s.(f) = v; end
+end
+
+function o = ternary(c,a,b)
+if c, o = a; else, o = b; end
+end
