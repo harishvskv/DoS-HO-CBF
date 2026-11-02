@@ -1,0 +1,56 @@
+function [ug, u_edge, ci] = ctrl_pi_agc(x, p, mode, gains)
+%CTRL_PI_AGC  Area control error proportional-integral law for the central and edge references.
+
+if nargin < 3 || isempty(mode),  mode  = 'agc_only'; end
+if nargin < 4,                   gains = struct();   end
+
+g = gains;
+if ~isfield(g,'Kp')   || isempty(g.Kp),   g.Kp   = p.agc.Kp;  end
+if ~isfield(g,'Ki')   || isempty(g.Ki),   g.Ki   = p.agc.Ki;  end
+if ~isfield(g,'Kp_e') || isempty(g.Kp_e), g.Kp_e = p.agc.Kp_e;  end
+if ~isfield(g,'Ki_e') || isempty(g.Ki_e), g.Ki_e = p.agc.Ki_e;  end
+if ~isfield(g,'K_soc')|| isempty(g.K_soc),g.K_soc= p.agc.K_soc; end
+if ~isfield(g,'sigma')|| isempty(g.sigma),g.sigma = 0;          end
+
+ix   = p.spec.ix;
+df   = x(ix.df);
+dPti = x(ix.dPtie);
+zACE = x(ix.zACE);
+
+ACE = p.beta*df + dPti;
+
+ug_raw = -( g.Kp*ACE + g.Ki*zACE );
+ug     = min(max(ug_raw, p.agc.u_min), p.agc.u_max);
+sat_g  = abs(ug - ug_raw) > eps;
+
+SoC = x(ix.dSB);
+quiet  = abs(x(ix.df)) <= p.df_db;
+g_soc  = double(quiet && (g.sigma == 0));
+
+uB_raw = -( g.Kp_e*ACE + g.Ki_e*zACE ) - g_soc*g.K_soc*(SoC - p.SoC_nom);
+uA_raw = +( g.Kp_e*ACE + g.Ki_e*zACE );
+
+uB = min(max(uB_raw, p.uB_min), p.uB_max);
+uA = min(max(uA_raw, p.uA_min), p.uA_max);
+
+switch lower(mode)
+    case 'agc_only'   % A0
+        u_edge = [0; 0];
+        sat_B  = false;  sat_A = false;
+    case 'agc_edge'   % A1
+        u_edge = [uB; uA];
+        sat_B  = abs(uB - uB_raw) > eps;
+        sat_A  = abs(uA - uA_raw) > eps;
+    case 'edge_only'   % u_ref for the QP
+        ug     = 0;  sat_g = false;
+        u_edge = [uB; uA];
+        sat_B  = abs(uB - uB_raw) > eps;
+        sat_A  = abs(uA - uA_raw) > eps;
+    otherwise
+        error('ctrl_pi_agc:mode','Unknown mode "%s"', mode);
+end
+
+ci = struct('ACE',ACE,'zACE',zACE,'SoC_err',SoC - p.SoC_nom,'sat_g',sat_g,'sat_B',sat_B,'sat_A',sat_A, ...
+            'ug_raw',ug_raw,'uB_raw',uB_raw,'uA_raw',uA_raw,'mode',mode, ...
+            'g_soc',g_soc);
+end
