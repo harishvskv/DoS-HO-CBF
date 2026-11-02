@@ -1,0 +1,29 @@
+function [Xn, DG] = cpmg_integrate_multiarea(X, Ug, U, D, P, h, method)
+%CPMG_INTEGRATE_MULTIAREA  Fully coupled fixed-step integration of the N-area plant.
+
+if nargin < 7 || isempty(method), method = P(1).spec.num.integrator; end
+
+f = @(XX) stackedField(XX, Ug, U, D, P);
+
+switch lower(method)
+    case 'euler'
+        [k1, DG] = f(X);
+        Xn = X + h*k1;
+
+    case 'rk4'
+        [k1, DG] = f(X);
+        k2 = f(X + 0.5*h*k1);
+        k3 = f(X + 0.5*h*k2);
+        k4 = f(X +     h*k3);
+        Xn = X + (h/6)*(k1 + 2*k2 + 2*k3 + k4);
+
+    otherwise
+        error('cpmg_integrate_multiarea:method','Unknown integrator "%s"', method);
+end
+
+end
+
+function [Xdot, DG] = stackedField(X, Ug, U, D, P)
+[F, G, DG] = cpmg_dynamics_multiarea(X, Ug, D, P);
+Xdot = F + G*U;
+end
