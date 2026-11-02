@@ -1,0 +1,103 @@
+function spec = cpmg_spec()
+%CPMG_SPEC  Shared specification: state indices, safety limits, unit conversions, relay stages.
+
+spec.version      = 'spec-2.0';
+spec.description  = 'Canonical R^9 CPMG spec, IEGC-2023 safety tiers, Hui sign convention';
+
+spec.nx = 9;   % states per area
+spec.nu = 2;
+spec.nd = 3;
+
+spec.ix.df    = 1;
+spec.ix.dPtie = 2;
+spec.ix.dPm   = 3;
+spec.ix.dPv   = 4;
+spec.ix.zACE  = 5;
+spec.ix.dPB   = 6;
+spec.ix.dSB   = 7;
+spec.ix.dPA   = 8;
+spec.ix.dTin  = 9;
+
+spec.iu.uB    = 1;
+spec.iu.uA    = 2;
+
+spec.id.dPres = 1;
+spec.id.dPL   = 2;
+spec.id.dTout = 3;
+
+spec.stateNames = { 'df','dPtie','dPm','dPv','zACE','dPB','dSB','dPA','dTin' };
+spec.stateUnits = { 'pu','pu','pu','pu','pu*s','pu','frac','pu','degC' };
+spec.inputNames = { 'u_BESS','u_AIAC' };
+spec.distNames  = { 'dP_res','dP_L','dT_out' };
+
+assert(isequal(sort(cell2mat(struct2cell(spec.ix))'),1:spec.nx), ...
+    'cpmg_spec: state index map is not a permutation of 1..nx');
+
+spec.f_base_Hz = 50.0;   % system base frequency
+
+hz2pu = @(fHz) (fHz - spec.f_base_Hz)/spec.f_base_Hz;
+spec.hz2pu = hz2pu;
+spec.pu2hz = @(pu) pu*spec.f_base_Hz;   % deviation in pu -> deviation in Hz
+
+spec.band.f_lo_Hz   = 49.900;
+spec.band.f_hi_Hz   = 50.050;
+spec.band.df_lo_pu  = hz2pu(49.900);   % -0.0020 p.u.
+spec.band.df_hi_pu  = hz2pu(50.050);   % +0.0010 p.u.
+spec.band.label     = 'IEGC-2023 normal operating band (performance only)';
+
+spec.ufls.f_Hz      = [49.40 , 49.20 , 49.00 , 48.80];
+spec.ufls.df_pu     = hz2pu(spec.ufls.f_Hz);   % [-0.0120 -0.0160 -0.0200 -0.0240]
+spec.ufls.shed_frac = [0.05  , 0.05  , 0.05  , 0.05 ];   % load shed per stage
+spec.ufls.delay_s   = [0.20  , 0.20  , 0.20  , 0.20 ];   % relay operating time
+spec.ufls.reset_Hz  = 49.90;   % hysteresis reset level
+spec.ufls.stageName = {'Stage-1','Stage-2','Stage-3','Stage-4'};
+
+spec.safety.stage_index = 1;   % UFR Stage-1
+spec.safety.df_min_pu   = spec.ufls.df_pu(spec.safety.stage_index);   % -0.0120
+spec.safety.df_min_Hz   = spec.ufls.f_Hz(spec.safety.stage_index);   % 49.40
+spec.safety.source      = 'IEGC 2023 / NLDC Operating Procedure, UFR Stage-1 (49.40 Hz)';
+
+spec.safety.df_max_pu   = hz2pu(50.50);
+spec.safety.df_max_note = 'Engineering choice (50.50 Hz). Not IEGC-mandated. Reporting only.';
+
+spec.safety.SoC_min   = 0.20;   % BESS PHYSICAL lower SoC bound
+spec.safety.SoC_max   = 0.90;   % BESS PHYSICAL upper SoC bound
+spec.safety.SoC_nom   = 0.50;   % nominal / reference SoC
+
+spec.safety.SoC_anchor = 'effective';   % 'effective' | 'physical'
+spec.safety.Phi_floor_at_anchor = 0.45;   % required Phi at the enforced bound
+
+spec.safety.Tin_min_C = 20.0;   % ASHRAE thermal comfort lower bound
+spec.safety.Tin_max_C = 24.0;   % ASHRAE thermal comfort upper bound
+spec.safety.Tin_ref_C = 22.0;   % comfort set point
+
+spec.sign.swing_dPB   = +1;
+spec.sign.swing_dPA   = -1;
+spec.sign.swing_dPtie = -1;
+spec.sign.thermal_dPA = -1;
+spec.sign.soc_dPB     = -1;   % discharging lowers SoC
+spec.sign.reference   = 'Hui et al., IEEE TIE 66(2):1413, 2019; IEEE TIE 68(3):2725, 2021';
+
+spec.use_Phi_in_G = true;
+spec.use_CLF      = true;
+
+spec.nl.governor_deadband = true;   % Section II-B
+spec.nl.turbine_GRC       = true;   % Section II-B
+spec.nl.load_frequency    = true;   % gamma-exponent composite load
+spec.nl.bess_Phi          = true;   % Section II-C
+spec.nl.cop_temperature   = false;   % optional COP(T_out,T_in) derating
+
+spec.nl.deadband_mode = 'hard';   % 'hard' | 'smooth'
+spec.nl.grc_mode      = 'hard';   % 'hard' | 'smooth'
+
+spec.num.Ts_plant   = 1e-3;   % plant integration step [s] (RK4)
+spec.num.Ts_ctrl    = 1e-2;
+spec.num.integrator = 'rk4';   % 'rk4' | 'euler'
+spec.num.eps_guard  = 1e-9;
+
+spec.debug.checkBlockDiag = false;
+
+assert(mod(round(spec.num.Ts_ctrl/spec.num.Ts_plant),1)==0, ...
+    'cpmg_spec: Ts_ctrl must be an integer multiple of Ts_plant');
+
+end
