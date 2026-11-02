@@ -1,0 +1,32 @@
+function [xn, info] = cpmg_integrate(x, ug, u, d, p, tie_in, h, method)
+%CPMG_INTEGRATE  Fixed-step integration of one area over one sample, zero-order hold on inputs.
+
+if nargin < 8 || isempty(method), method = p.spec.num.integrator; end
+if nargin < 6 || isempty(tie_in), tie_in = 0; end
+
+f = @(xx) fieldEval(xx, ug, u, d, p, tie_in);
+
+switch lower(method)
+    case 'euler'
+        [k1, dg] = f(x);
+        xn = x + h*k1;
+        info = dg;  info.nfev = 1;
+
+    case 'rk4'
+        [k1, dg] = f(x);
+        k2 = f(x + 0.5*h*k1);
+        k3 = f(x + 0.5*h*k2);
+        k4 = f(x +     h*k3);
+        xn = x + (h/6)*(k1 + 2*k2 + 2*k3 + k4);
+        info = dg;  info.nfev = 4;
+
+    otherwise
+        error('cpmg_integrate:method','Unknown integrator "%s"', method);
+end
+
+end
+
+function [xdot, dg] = fieldEval(x, ug, u, d, p, tie_in)
+[F, G, dg] = cpmg_dynamics(x, ug, d, p, tie_in);
+xdot = F + G*u;
+end
