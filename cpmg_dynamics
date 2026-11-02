@@ -1,0 +1,164 @@
+function [F, G, dg] = cpmg_dynamics(x, ug, d, p, tie_in)
+%CPMG_DYNAMICS  Nonlinear drift and input matrix of one area with dead-band, rate limit and composite load.
+
+if nargin < 5 || isempty(tie_in), tie_in = 0; end
+
+spec = p.spec;
+ix   = spec.ix;
+eps0 = spec.num.eps_guard;
+
+df    = x(ix.df);
+dPtie = x(ix.dPtie);
+dPm   = x(ix.dPm);
+dPv   = x(ix.dPv);
+dPB   = x(ix.dPB);
+SoC   = x(ix.dSB);
+dPA   = x(ix.dPA);
+dTin  = x(ix.dTin);
+
+dPres = d(spec.id.dPres);
+dPL   = d(spec.id.dPL);
+dTout = d(spec.id.dTout);
+
+F = zeros(spec.nx,1);
+G = zeros(spec.nx,spec.nu);
+
+if spec.nl.load_frequency
+    base    = max(1 + p.D*df, eps0);   % guard: no complex powers
+    PL      = (p.PL0 + dPL)*base^p.gamma;
+    dPL_ddf = (p.PL0 + dPL)*p.gamma*p.D*base^(p.gamma-1);
+else
+    PL      = (p.PL0 + dPL) + p.D*df;
+    dPL_ddf = p.D;
+end
+
+F(ix.df) = ( dPm + dPB + dPres - dPA - dPtie - (PL - p.PL0) )/p.M;
+
+F(ix.dPtie) = tie_in;
+
+raw_Pm = (-dPm + dPv)/p.Tt;
+if spec.nl.turbine_GRC
+    switch lower(spec.nl.grc_mode)
+        case 'hard'
+            dPm_dot = min(max(raw_Pm, -p.GRC), p.GRC);
+        case 'smooth'
+            dPm_dot = p.GRC*tanh(p.grc_smooth_k*raw_Pm/p.GRC);
+        otherwise
+            error('cpmg_dynamics:grcMode','Unknown grc_mode "%s"', spec.nl.grc_mode);
+    end
+else
+    dPm_dot = raw_Pm;
+end
+grc_active = abs(raw_Pm) > p.GRC*(1 - 1e-9) && spec.nl.turbine_GRC;
+
+[dPm_dot, sig_Pm] = clampRate(dPm, dPm_dot, p.Pm_min, p.Pm_max, p.aw_band);
+F(ix.dPm) = dPm_dot;
+
+if spec.nl.governor_deadband
+    switch lower(spec.nl.deadband_mode)
+        case 'hard'
+            phi_db = deadbandHard(df, p.df_db);
+        case 'smooth'
+            phi_db = deadbandSmooth(df, p.df_db, p.db_smooth_k);
+        otherwise
+            error('cpmg_dynamics:dbMode','Unknown deadband_mode "%s"', spec.nl.deadband_mode);
+    end
+else
+    phi_db = df;
+end
+db_active = spec.nl.governor_deadband && abs(df) <= p.df_db;
+
+raw_Pv = ( -dPv - phi_db/p.R + ug )/p.Tg;
+[dPv_dot, sig_Pv] = clampRate(dPv, raw_Pv, p.Pv_min, p.Pv_max, p.aw_band);
+F(ix.dPv) = dPv_dot;
+
+ACE = p.beta*df + dPtie;
+F(ix.zACE) = ACE;
+
+if spec.nl.bess_Phi && spec.use_Phi_in_G
+    Phi = socSaturation(SoC, p.SoC_lo, p.SoC_hi, p.ks);
+else
+    Phi = 1.0;
+end
+Phi_degen = Phi < p.Phi_min;
+
+F(ix.dPB)      = -dPB/p.TB;
+G(ix.dPB, spec.iu.uB) = Phi/p.TB;   % <-- Phi appears in LgLf_h
+
+F(ix.dSB) = -p.eta_B*dPB/p.E_B_s;
+
+if (SoC >= 1 && F(ix.dSB) > 0) || (SoC <= 0 && F(ix.dSB) < 0)
+    F(ix.dSB) = 0;
+end
+
+F(ix.dPA)      = -dPA/p.Tac;
+G(ix.dPA, spec.iu.uA) = 1/p.Tac;
+
+Tin_abs  = p.Tin_ref  + dTin;
+Tout_abs = p.Tout_nom + dTout;
+
+if spec.nl.cop_temperature
+    COP_eff = p.COP*(1 - p.COP_slope*((Tout_abs - Tin_abs) - p.COP_dTnom));
+    COP_eff = min(max(COP_eff, p.COP_min), p.COP_max);
+else
+    COP_eff = p.COP;
+end
+bT_eff = p.b_T*(COP_eff/p.COP);
+
+F(ix.dTin) = p.a_T*(Tout_abs - Tin_abs) - bT_eff*(p.PA_nom + dPA);
+
+dg = struct( ...
+    'Phi',        Phi, ...
+    'Phi_degen',  Phi_degen, ...
+    'PL',         PL, ...
+    'dPL_ddf',    dPL_ddf, ...
+    'dPm_dot',    dPm_dot, ...
+    'dPv_dot',    dPv_dot, ...
+    'ACE',        ACE, ...
+    'phi_db',     phi_db, ...
+    'db_active',  db_active, ...
+    'grc_active', grc_active, ...
+    'lim_active', [sig_Pv < 1, sig_Pm < 1], ...
+    'aw_sigma',   [sig_Pv, sig_Pm], ...
+    'COP_eff',    COP_eff, ...
+    'Tin_abs',    Tin_abs, ...
+    'Tout_abs',   Tout_abs );
+
+end   % cpmg_dynamics
+
+function y = deadbandHard(u, w)
+if u > w
+    y = u - w;
+elseif u < -w
+    y = u + w;
+else
+    y = 0;
+end
+end
+
+function y = deadbandSmooth(u, w, k)
+y = u - w*tanh(k*u/max(w,eps));
+end
+
+function Phi = socSaturation(S, S_lo, S_hi, k)
+Phi = 0.25*(1 + tanh(k*(S - S_lo)))*(1 - tanh(k*(S - S_hi)));
+Phi = min(max(Phi, 0), 1);
+end
+
+function [xd, sigma] = clampRate(xv, xd, lo, hi, band)
+if nargin < 5 || isempty(band), band = 1e-3; end
+band = max(band, eps);
+
+if xd > 0
+    sigma = satlin((hi - xv)/band);
+elseif xd < 0
+    sigma = satlin((xv - lo)/band);
+else
+    sigma = 1;
+end
+xd = sigma*xd;
+end
+
+function z = satlin(z)
+z = min(max(z,0),1);
+end
