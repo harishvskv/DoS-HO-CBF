@@ -1,0 +1,48 @@
+function [F, G, DG] = cpmg_dynamics_multiarea(X, Ug, D, P)
+%CPMG_DYNAMICS_MULTIAREA  Stacked nonlinear dynamics of N areas with tie-line coupling.
+
+spec = P(1).spec;
+nx   = spec.nx;
+nu   = spec.nu;
+nA   = numel(P);
+net  = P(1).net;
+
+assert(numel(X) == nA*nx, 'cpmg_dynamics_multiarea: X must be %d x 1', nA*nx);
+assert(numel(Ug) == nA,   'cpmg_dynamics_multiarea: Ug must be %d x 1', nA);
+assert(size(D,1) == nA && size(D,2) == spec.nd, ...
+       'cpmg_dynamics_multiarea: D must be %d x %d', nA, spec.nd);
+
+F = zeros(nA*nx, 1);
+G = zeros(nA*nx, nA*nu);
+
+df = zeros(nA,1);
+for i = 1:nA
+    df(i) = X((i-1)*nx + spec.ix.df);
+end
+
+for i = 1:nA
+    rows = (i-1)*nx + (1:nx);
+    cols = (i-1)*nu + (1:nu);
+
+    tie_in = 2*pi * sum( net.T_ij(i,:)' .* (df(i) - df) );
+
+    [Fi, Gi, dgi] = cpmg_dynamics(X(rows), Ug(i), D(i,:)', P(i), tie_in);
+
+    F(rows)       = Fi;
+    G(rows, cols) = Gi;
+
+    dgi.tie_in = tie_in;
+    dgi.area   = i;
+    DG(i) = dgi;   % #ok<AGROW>
+end
+
+if isfield(spec,'debug') && isfield(spec.debug,'checkBlockDiag') && spec.debug.checkBlockDiag
+    mask = true(size(G));
+    for i = 1:nA
+        mask((i-1)*nx + (1:nx), (i-1)*nu + (1:nu)) = false;
+    end
+    assert(all(G(mask) == 0), ...
+        'cpmg_dynamics_multiarea: G is not block diagonal; actuation is not decentralised');
+end
+
+end
